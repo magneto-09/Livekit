@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx agent.ts dev",
-    "start": "tsx agent.ts start",
+    "build": "tsc",
+    "start": "node dist/agent.js start",
     "download-files": "tsx agent.ts download-files",
     "typecheck": "tsc --noEmit"
   },
