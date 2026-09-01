@@ -1,0 +1,24 @@
+{
+  "name": "agent",
+  "version": "1.0.0",
+  "description": "AI voice interviewer agent",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx agent.ts dev",
+    "start": "tsx agent.ts start",
+    "download-files": "tsx agent.ts download-files",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@livekit/agents": "^1.7.1",
+    "@livekit/rtc-node": "^0.13.34",
+    "axios": "^1.20.0",
+    "dotenv": "^17.4.2",
+    "tsx": "^4.23.13"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2"
+  }
+}
