@@ -239,8 +239,3 @@ Route: `/interview/result/:roomName` (`frontend/src/pages/result/ResultPage.tsx`
   close mid-interview loses the client-side in-progress recording buffer (this is inherent to
   doing recording client-side instead of via server-side Egress).
 
-## What's Next (Part F, not implemented)
-
-Candidate scoring/evaluation, authentication, a dashboard listing past interviews, persistence
-beyond in-memory storage, and any deployment/CI infrastructure are all explicitly out of scope
-for this assignment and were not implemented.
