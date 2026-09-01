@@ -44,16 +44,14 @@ app.get("/", (req: Request, res: Response) => {
 // error, or an async handler's rejected promise — Express 5 forwards those
 // here automatically) lands here instead of Express's default HTML error
 // page, so API clients always get JSON and the terminal always gets a log.
-app.use(
-  (err: unknown, req: Request, res: Response, _next: NextFunction) => {
-    logError(`Unhandled error on ${req.method} ${req.originalUrl}`, err);
-    if (res.headersSent) {
-      return;
-    }
-    res.status(500).json({ error: "Internal server error" });
-  },
-);
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+  logError(`Unhandled error on ${req.method} ${req.originalUrl}`, err);
+  if (res.headersSent) {
+    return;
+  }
+  res.status(500).json({ error: "Internal server error" });
+});
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`App is up and running: http://localhost:${PORT}`);
 });
