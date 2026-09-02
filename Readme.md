@@ -26,6 +26,7 @@ cd ../frontend && npm install
 ### Environment variables
 
 `backend/.env` (copy from `backend/.env.example`):
+
 ```
 LIVEKIT_URL=
 LIVEKIT_API_KEY=
@@ -35,6 +36,7 @@ ALLOWED_ORIGINS=http://localhost:3000
 ```
 
 `agent/.env` (copy from `agent/.env.example`):
+
 ```
 LIVEKIT_URL=
 LIVEKIT_API_KEY=
@@ -42,10 +44,12 @@ LIVEKIT_API_SECRET=
 LIVEKIT_AGENT_NAME=interviewer-agent
 BACKEND_URL=http://localhost:8000
 ```
+
 `BACKEND_URL` is how the Agent (a separate Node process) reports the final transcript/status
 back to the backend when an interview finishes — see [Transcript](#transcript) below.
 
 `frontend/.env` (copy from `frontend/.env.example`):
+
 ```
 VITE_API_BASE_URL=http://localhost:8000
 VITE_LIVEKIT_URL=
@@ -67,6 +71,33 @@ cd frontend && npm run dev   # http://localhost:3000
 ```
 
 ## Architecture
+
+At the top level, the pipeline is:
+
+```
+Frontend
+   ↓
+LiveKit
+   ↓
+Agent
+   ↓
+STT → LLM → TTS
+```
+
+- **Frontend** (React) — collects candidate name/job title/questions, calls the backend to
+  start an interview, then joins the returned LiveKit room as the candidate and renders the
+  live call UI, transcript, and (once the interview ends) the result page.
+- **LiveKit** — the real-time room that carries audio between the candidate's browser and the
+  agent, and is also the transport for the "interview completed" signal the agent sends back to
+  the frontend (see [Audio Recording](#audio-recording)).
+- **Agent** (Node worker) — a `voice.AgentSession` joins the same room as a second participant
+  and runs the actual interview logic (`InterviewController`).
+- **STT → LLM → TTS** — for every candidate turn, the session pipes the captured audio through
+  STT to get text, the transcript through the LLM to get a response, and that response through
+  TTS to speak it back — all three stages run through LiveKit's `inference` gateway (see
+  [AI Providers](#ai-providers)).
+
+Full request path, including the backend that sits in front of LiveKit:
 
 ```
 Frontend (React)
@@ -90,19 +121,69 @@ LiveKit Room
 ```
 
 The frontend's existing `/get-token`-style flow from earlier parts (`connect.services.ts` →
-`useRoomTokenStore` → `LiveKitProvider`) is unchanged — Part E only adds what happens *after*
+`useRoomTokenStore` → `LiveKitProvider`) is unchanged — Part E only adds what happens _after_
 the interview ends.
+
+## AI Providers
+
+All three stages run through LiveKit's `inference` gateway (`agent/agent.ts`), authenticated
+with the same `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` as the room connection — no separate
+provider API keys to manage for STT/TTS:
+
+| Stage | Provider / model | Why |
+| --- | --- | --- |
+| STT | Deepgram `nova-3` | Low-latency streaming transcription with strong accuracy on conversational speech, which matters for an interview where answers vary widely in length and phrasing. |
+| LLM | Google `gemma-4-31b-it` | A small, fast instruction-tuned model — the agent's per-turn job (a one-line acknowledgement, no open-ended reasoning) doesn't need a larger model, so a cheaper/faster one keeps turn latency down. |
+| TTS | Inworld `inworld-tts-2` (voice: `Ashley`) | Natural-sounding conversational voice output, available directly through the same inference gateway as STT/LLM. |
+
+Only the OpenAI key (`OPENAI_API_KEY`, used for the agent's own tooling) is a separate
+credential — see [Environment variables](#environment-variables).
+
+## Interview Flow
+
+```
+Question
+   ↓
+Candidate answer
+   ↓
+AI response
+   ↓
+Next question
+```
+
+This loop is implemented entirely inside `InterviewController` (`agent/interview-controller.ts`),
+driven by two LiveKit Agents SDK hooks:
+
+1. **Question** — `askCurrentQuestion()` pushes an `"ai"` transcript entry for the current
+   question and calls `session.say(question)` (TTS speaks it into the room).
+2. **Candidate answer** — the candidate's speech is transcribed by STT and surfaced through
+   `InterviewerAgent.onUserTurnCompleted()` (`agent/interviewer.ts`), which hands the text to
+   `controller.processCandidateAnswer(text)` and then throws `voice.StopResponse()` — this tells
+   the SDK's own default reply generation to stand down, since the controller drives the LLM
+   call itself.
+3. **AI response** — `processCandidateAnswer()` stores the answer, then calls
+   `session.generateReply()` (LLM) with an instruction to give a single short acknowledgement
+   (or, on the final question, a closing thank-you) rather than free-form conversation — this
+   keeps the agent's LLM turn on a leash instead of letting it improvise new questions.
+4. **Next question** — once the LLM reply succeeds, `currentQuestionIndex` is incremented and
+   `askCurrentQuestion()` runs again for the next question, or the interview is marked
+   `completed` if that was the last one.
+
+The same object (`InterviewState`) tracks `currentQuestionIndex`, `answers`, and `transcript`
+throughout, so this is a plain state machine rather than something the LLM is trusted to drive.
 
 ## Transcript
 
 **Model** (`agent/interview-state.ts`):
+
 ```ts
 interface TranscriptMessage {
-  speaker: "ai" | "candidate"
-  text: string
-  timestamp: string
+  speaker: "ai" | "candidate";
+  text: string;
+  timestamp: string;
 }
 ```
+
 `InterviewState.transcript: TranscriptMessage[]` sits alongside the existing `answers` array
 (which the controller already used to gate question progression) — the transcript is a pure
 conversation log and doesn't affect interview control flow.
@@ -134,17 +215,18 @@ room's actual mixed audio in the browser.
 
 **Mechanism** (`frontend/src/hooks/use-interview-recorder.ts`): a Web Audio
 `MediaStreamAudioDestinationNode` is used as a mixer. Every audio track that gets
-published/subscribed in the room — the candidate's own mic *and* the agent's TTS output track —
+published/subscribed in the room — the candidate's own mic _and_ the agent's TTS output track —
 is routed into that one destination via `AudioContext.createMediaStreamSource(...).connect(destination)`.
 A single `MediaRecorder` records `destination.stream`, so the resulting file is the actual
 two-way conversation, not just the candidate's local mic (which the assignment explicitly
 warns against).
 
 **Lifecycle**:
+
 - Starts as soon as `InterviewRoom` mounts (i.e. once the candidate has joined the room).
 - Stops when the interview ends. The Agent detects completion/abort in
   `InterviewController.finish()` and broadcasts a LiveKit data message
-  (`{ type: "interview-completed", status }`) to the room *before* shutting down, so the
+  (`{ type: "interview-completed", status }`) to the room _before_ shutting down, so the
   closing message is still part of the recording. The frontend listens for that message,
   stops the recorder, uploads the resulting blob, disconnects, and navigates to the result
   page. Manually clicking "End Interview" runs the same finalize path directly (treated as
@@ -200,19 +282,19 @@ Route: `/interview/result/:roomName` (`frontend/src/pages/result/ResultPage.tsx`
   backend before shutting the session down.
 - **Recording failure**: logged, never blocks the interview or navigation (see above).
 - **Agent/session failure**: `AgentSessionEventTypes.Close` fires whenever the session ends for
-  *any* reason, including ones our own code didn't trigger (a crash, an unrecoverable error).
+  _any_ reason, including ones our own code didn't trigger (a crash, an unrecoverable error).
   `InterviewController.finalizeIfUnreported()` is wired to that event: if the interview hasn't
   already been reported as completed/aborted, it force-marks it `aborted` and reports it, so an
   interview can never get stuck `in-progress` forever in the backend's store.
 
 ### Problem-Solving Question
 
-*Candidate is answering Question 2, but the LLM request fails.*
+_Candidate is answering Question 2, but the LLM request fails._
 
 1. **The interview stays on Question 2.** `currentQuestionIndex` is only ever incremented after
    `generateReply()` succeeds (`interview-controller.ts`, `processCandidateAnswer`) — a failure
    returns early before that line runs.
-2. **The candidate's answer isn't lost.** The answer is pushed to `state.answers` *before* the
+2. **The candidate's answer isn't lost.** The answer is pushed to `state.answers` _before_ the
    LLM call is attempted, and is guarded against duplicate pushes on the next attempt
    (`!state.answers.some(item => item.question === question)`).
 3. **The Agent retries once.** `withRetry()` re-invokes `generateReply()` a single time before
@@ -230,7 +312,7 @@ Route: `/interview/result/:roomName` (`frontend/src/pages/result/ResultPage.tsx`
   survive a backend restart (`nodemon` will drop live interview records on every file save,
   same limitation the assignment explicitly accepts for a POC).
 - `duration` is measured backend-side from dispatch time to the Agent's completion report, not
-  from the exact moment the candidate started speaking — close enough for this assignment.
+  from the exact moment the candidate started speaking.
 - If a candidate manually clicks "End Interview" and the browser tab closes quickly afterward,
   there's a small window where the backend's `aborted` status (reported by the Agent's own
   disconnect handling) hasn't landed yet when the result page's first fetch happens — the
@@ -238,4 +320,3 @@ Route: `/interview/result/:roomName` (`frontend/src/pages/result/ResultPage.tsx`
 - Recording requires the browser tab to stay open until the interview finishes; a hard tab
   close mid-interview loses the client-side in-progress recording buffer (this is inherent to
   doing recording client-side instead of via server-side Egress).
-
